@@ -134,6 +134,7 @@ jobs:
       #  with:
       #    name: windows-cuda-deps
       - run: dir llm/build
+      # $env:GGML_CUDA_F16="1"
       - run: |
           $gopath=(get-command go).source | split-path -parent
           & "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\Launch-VsDevShell.ps1"
@@ -141,8 +142,8 @@ jobs:
           $env:CMAKE_SYSTEM_VERSION="10.0.22621.0"
           $env:PATH="$gopath;$env:PATH"
           $env:OLLAMA_SKIP_GENERATE="1"
-          $env:CMAKE_CUDA_ARCHITECTURES=89
-	  $env:GGML_CUDA_F16=true
+          $env:CMAKE_CUDA_ARCHITECTURES="89"
+	  $env:GGML_CUDA_F16="1"
           & .\scripts\build_windows.ps1
       - uses: actions/upload-artifact@v4
         with:
