@@ -1,205 +1,266 @@
-name: release_win
+#!powershell
 
-on:
-  push:
-    branches:
-    - main
-  workflow_dispatch:
+$ErrorActionPreference = "Stop"
 
-jobs:
-  # CUDA generation step
-  generate-windows-cuda:
-    environment: release
-    runs-on: windows-2019
-    env:
-      KEY_CONTAINER: ${{ vars.KEY_CONTAINER }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set Version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-      #- uses: 'google-github-actions/auth@v2'
-      #  with:
-      #    project_id: 'ollama'
-      #    credentials_json: '${{ secrets.GOOGLE_SIGNING_CREDENTIALS }}'
-      # - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
-      - name: install Windows SDK 10 to get signtool
-        run: |
-          $ErrorActionPreference = "Stop"
-          write-host "downloading SDK"
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe" -OutFile "${env:RUNNER_TEMP}\winsdksetup.exe"
-          Start-Process "${env:RUNNER_TEMP}\winsdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
-          write-host "Win SDK 10 installed"
-          gci -path 'C:\Program Files (x86)\Windows Kits\' -r -fi 'signtool.exe'
-      - name: install signing plugin
-        run: |
-          $ErrorActionPreference = "Stop"
-          write-host "downloading plugin"
-          Invoke-WebRequest -Uri "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.0/kmscng-1.0-windows-amd64.zip" -OutFile "${env:RUNNER_TEMP}\plugin.zip"
-          Expand-Archive -Path "${env:RUNNER_TEMP}\plugin.zip" -DestinationPath ${env:RUNNER_TEMP}\plugin\
-          write-host "Installing plugin"
-          & "${env:RUNNER_TEMP}\plugin\*\kmscng.msi" /quiet
-          write-host "plugin installed"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "stable"
-          cache: true
-      - name: 'Install CUDA'
-        run: |
-          $ErrorActionPreference = "Stop"
-          write-host "downloading CUDA Installer"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe" -OutFile "${env:RUNNER_TEMP}\cuda-install.exe"
-          write-host "Installing CUDA"
-          Start-Process "${env:RUNNER_TEMP}\cuda-install.exe" -ArgumentList '-s' -NoNewWindow -Wait
-          write-host "Completed CUDA"
-          $cudaPath=((resolve-path "c:\Program Files\NVIDIA*\CUDA\v*\bin\nvcc.exe")[0].path | split-path | split-path)
-          $cudaVer=($cudaPath | split-path -leaf ) -replace 'v(\d+).(\d+)', '$1_$2' 
-          echo "$cudaPath\bin" >> $env:GITHUB_PATH
-          echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
-          echo "CUDA_PATH_V${cudaVer}=$cudaPath" >> $env:GITHUB_ENV
-          echo "CUDA_PATH_VX_Y=CUDA_PATH_V${cudaVer}" >> $env:GITHUB_ENV
-      - name: 'Verify CUDA'
-        run: nvcc -V
-      - run: go get ./...
-      - name: go generate
-        run: |
-          $gopath=(get-command go).source | split-path -parent
-          $cudabin=(get-command nvcc).source | split-path
-          & "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\Launch-VsDevShell.ps1"
-          cd $env:GITHUB_WORKSPACE
-          $env:CMAKE_SYSTEM_VERSION="10.0.22621.0"
-          $env:PATH="$gopath;$cudabin;$env:PATH"
-          $env:OLLAMA_SKIP_CPU_GENERATE="1"
-          go generate -x ./...
-      - name: 'gather cuda dependencies'
-        run: |
-          $NVIDIA_DIR=(resolve-path 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\')[0]
-          md "dist\deps"
-          cp "${NVIDIA_DIR}\cudart64_*.dll" "dist\deps\"
-          cp "${NVIDIA_DIR}\cublas64_*.dll" "dist\deps\"
-          cp "${NVIDIA_DIR}\cublasLt64_*.dll" "dist\deps\"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: generate-windows-cuda
-          path: |
-            llm/build/**/bin/*
-            dist/windows-amd64/**
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-cuda-deps
-          path: dist/deps/*
+function init_vars {
+    if (!$script:SRC_DIR) {
+        $script:SRC_DIR = $(resolve-path "..\..\")
+    }
+    if (!$script:llamacppDir) {
+        $script:llamacppDir = "../llama.cpp"
+    }
+    if (!$script:cmakeTargets) {
+        $script:cmakeTargets = @("ollama_llama_server")
+    }
+    $script:cmakeDefs = @(
+        "-DBUILD_SHARED_LIBS=on",
+        "-DGGML_NATIVE=on",
+        "-DGGML_OPENMP=on",
+	"-DGGML_CUDA_F16=on"
+        )
+    $script:commonCpuDefs = @("-DCMAKE_POSITION_INDEPENDENT_CODE=on")
+    $script:ARCH = $Env:PROCESSOR_ARCHITECTURE.ToLower()
+    $script:DIST_BASE = "${script:SRC_DIR}\dist\windows-${script:ARCH}\ollama_runners"
+    md "$script:DIST_BASE" -ea 0 > $null
+    if ($env:CGO_CFLAGS -contains "-g") {
+        $script:cmakeDefs += @("-DCMAKE_VERBOSE_MAKEFILE=on", "-DLLAMA_SERVER_VERBOSE=on", "-DCMAKE_BUILD_TYPE=RelWithDebInfo")
+        $script:config = "RelWithDebInfo"
+    } else {
+        $script:cmakeDefs += @("-DLLAMA_SERVER_VERBOSE=off", "-DCMAKE_BUILD_TYPE=Release")
+        $script:config = "Release"
+    }
+    if ($null -ne $env:CMAKE_SYSTEM_VERSION) {
+        $script:cmakeDefs += @("-DCMAKE_SYSTEM_VERSION=${env:CMAKE_SYSTEM_VERSION}")
+    }
+    # Try to find the CUDA dir
+    if ($env:CUDA_LIB_DIR -eq $null) {
+        $d=(get-command -ea 'silentlycontinue' nvcc).path
+        if ($d -ne $null) {
+            $script:CUDA_LIB_DIR=($d| split-path -parent)
+            $script:CUDA_INCLUDE_DIR=($script:CUDA_LIB_DIR|split-path -parent)+"\include"
+        }
+    } else {
+        $script:CUDA_LIB_DIR=$env:CUDA_LIB_DIR
+    }
+    $script:DUMPBIN=(get-command -ea 'silentlycontinue' dumpbin).path
+    if ($null -eq $env:CMAKE_CUDA_ARCHITECTURES) {
+        $script:CMAKE_CUDA_ARCHITECTURES="89"
+    } else {
+        $script:CMAKE_CUDA_ARCHITECTURES="89"
+    }
+    # Note: Windows Kits 10 signtool crashes with GCP's plugin
+    if ($null -eq $env:SIGN_TOOL) {
+        ${script:SignTool}="C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
+    } else {
+        ${script:SignTool}=${env:SIGN_TOOL}
+    }
+    if ("${env:KEY_CONTAINER}") {
+        ${script:OLLAMA_CERT}=$(resolve-path "${script:SRC_DIR}\ollama_inc.crt")
+    }
+}
 
-  # Import the prior generation steps and build the final windows assets
-  build-windows:
-    environment: release
-    runs-on: windows-2019
-    needs:
-      - generate-windows-cuda
-    env:
-      KEY_CONTAINER: ${{ vars.KEY_CONTAINER }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Set Version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-      # - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
-      - name: install Windows SDK 10 to get signtool
-        run: |
-          $ErrorActionPreference = "Stop"
-          write-host "downloading SDK"
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe" -OutFile "${env:RUNNER_TEMP}\winsdksetup.exe"
-          Start-Process "${env:RUNNER_TEMP}\winsdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
-          write-host "Win SDK 10 installed"
-          gci -path 'C:\Program Files (x86)\Windows Kits\' -r -fi 'signtool.exe'
-      - name: install signing plugin
-        run: |
-          $ErrorActionPreference = "Stop"
-          write-host "downloading plugin"
-          Invoke-WebRequest -Uri "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.0/kmscng-1.0-windows-amd64.zip" -OutFile "${env:RUNNER_TEMP}\plugin.zip"
-          Expand-Archive -Path "${env:RUNNER_TEMP}\plugin.zip" -DestinationPath ${env:RUNNER_TEMP}\plugin\
-          write-host "Installing plugin"
-          & "${env:RUNNER_TEMP}\plugin\*\kmscng.msi" /quiet
-          write-host "plugin installed"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "stable"
-          cache: true
-      - run: go get
-      - uses: actions/download-artifact@v4
-        with:
-          name: generate-windows-cuda
-      # - uses: actions/download-artifact@v4
-      #  with:
-      #    name: windows-cuda-deps
-      - run: dir llm/build
-      # $env:GGML_CUDA_F16="1"
-      - run: |
-          $gopath=(get-command go).source | split-path -parent
-          & "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\Launch-VsDevShell.ps1"
-          cd $env:GITHUB_WORKSPACE
-          $env:CMAKE_SYSTEM_VERSION="10.0.22621.0"
-          $env:PATH="$gopath;$env:PATH"
-          $env:OLLAMA_SKIP_GENERATE="1"
-          $env:CMAKE_CUDA_ARCHITECTURES="89"
-          & .\scripts\build_windows.ps1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-windows
-          path: |
-            dist/OllamaSetup.exe
-            dist/ollama-windows-*.zip
+function git_module_setup {
+    # TODO add flags to skip the init/patch logic to make it easier to mod llama.cpp code in-repo
+    & git submodule init
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    & git submodule update --force "${script:llamacppDir}"
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+}
 
-  # Aggregate all the assets and ship a release
-  release:
-    needs:
-      - build-windows
-    runs-on: ubuntu-22.04
-    environment: release
-    permissions:
-      contents: write
-    env:
-      OLLAMA_SKIP_IMAGE_BUILD: '1'
-      PUSH: '1'
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set Version
-        shell: bash
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-          echo "RELEASE_VERSION=$(echo ${GITHUB_REF_NAME} | cut -f1 -d-)" >> $GITHUB_ENV
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
-      # - run: ./scripts/build_docker.sh
-      - name: Retrieve built artifact
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: dist-*
-          merge-multiple: true
-      - run: |
-          ls -lh dist/
-          (cd dist; sha256sum * > sha256sum.txt)
-          cat dist/sha256sum.txt
-      - name: Create or update Release
-        run: |
-          echo "Looking for existing release for ${{ env.RELEASE_VERSION }}"
-          OLD_TAG=$(gh release ls --json name,tagName | jq -r ".[] | select(.name == \"${{ env.RELEASE_VERSION }}\") | .tagName")
-          if [ -n "$OLD_TAG" ]; then
-            echo "Updating release ${{ env.RELEASE_VERSION }} to point to new tag ${GITHUB_REF_NAME}"
-            gh release edit ${OLD_TAG} --tag ${GITHUB_REF_NAME}
-          else
-            echo "Creating new release ${{ env.RELEASE_VERSION }} pointing to tag ${GITHUB_REF_NAME}"
-            gh release create ${GITHUB_REF_NAME} \
-              --title ${{ env.RELEASE_VERSION }} \
-              --draft \
-              --generate-notes \
-              --prerelease
-          fi
-          echo "Uploading artifacts for tag ${GITHUB_REF_NAME}"
-          gh release upload ${GITHUB_REF_NAME} dist/* --clobber
+function apply_patches {
+    # Wire up our CMakefile
+    if (!(Select-String -Path "${script:llamacppDir}/CMakeLists.txt" -Pattern 'ollama')) {
+        Add-Content -Path "${script:llamacppDir}/CMakeLists.txt" -Value 'add_subdirectory(../ext_server ext_server) # ollama'
+    }
+
+    # Apply temporary patches until fix is upstream
+    $patches = Get-ChildItem "../patches/*.diff"
+    foreach ($patch in $patches) {
+        # Extract file paths from the patch file
+        $filePaths = Get-Content $patch.FullName | Where-Object { $_ -match '^\+\+\+ ' } | ForEach-Object {
+            $parts = $_ -split ' '
+            ($parts[1] -split '/', 2)[1]
+        }
+
+        # Checkout each file
+        foreach ($file in $filePaths) {
+            git -C "${script:llamacppDir}" checkout $file
+        }
+    }
+
+    # Apply each patch
+    foreach ($patch in $patches) {
+        git -C "${script:llamacppDir}" apply $patch.FullName
+    }
+}
+
+function build {
+    write-host "generating config with: cmake -S ${script:llamacppDir} -B $script:buildDir $script:cmakeDefs"
+    & cmake --version
+    & cmake -S "${script:llamacppDir}" -B $script:buildDir $script:cmakeDefs
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    if ($cmakeDefs -contains "-G") {
+        $extra=@("-j8")
+    } else {
+        $extra= @("--", "/p:CL_MPcount=8")
+    }
+    write-host "building with: cmake --build $script:buildDir --config $script:config $($script:cmakeTargets | ForEach-Object { `"--target`", $_ }) $extra"
+    & cmake --build $script:buildDir --config $script:config ($script:cmakeTargets | ForEach-Object { "--target", $_ }) $extra
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    # Rearrange output to be consistent between different generators
+    if ($null -ne ${script:config} -And (test-path -path "${script:buildDir}/bin/${script:config}" ) ) {
+        mv -force "${script:buildDir}/bin/${script:config}/*" "${script:buildDir}/bin/"
+        remove-item "${script:buildDir}/bin/${script:config}"
+    }
+}
+
+function sign {
+    if ("${env:KEY_CONTAINER}") {
+        write-host "Signing ${script:buildDir}/bin/*.exe  ${script:buildDir}/bin/*.dll"
+        foreach ($file in @(get-childitem "${script:buildDir}/bin/*.exe") + @(get-childitem "${script:buildDir}/bin/*.dll")){
+            & "${script:SignTool}" sign /v /fd sha256 /t http://timestamp.digicert.com /f "${script:OLLAMA_CERT}" `
+                /csp "Google Cloud KMS Provider" /kc "${env:KEY_CONTAINER}" $file
+            if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+        }
+    }
+}
+
+function install {
+    write-host "Installing binaries to dist dir ${script:distDir}"
+    mkdir ${script:distDir} -ErrorAction SilentlyContinue
+    $binaries = dir "${script:buildDir}/bin/*.exe"
+    foreach ($file in $binaries) {
+        copy-item -Path $file -Destination ${script:distDir} -Force
+    }
+
+    write-host "Installing dlls to dist dir ${script:distDir}"
+    $dlls = dir "${script:buildDir}/bin/*.dll"
+    foreach ($file in $dlls) {
+        copy-item -Path $file -Destination ${script:distDir} -Force
+    }
+}
+
+function cleanup {
+    $patches = Get-ChildItem "../patches/*.diff"
+    foreach ($patch in $patches) {
+        # Extract file paths from the patch file
+        $filePaths = Get-Content $patch.FullName | Where-Object { $_ -match '^\+\+\+ ' } | ForEach-Object {
+            $parts = $_ -split ' '
+            ($parts[1] -split '/', 2)[1]
+        }
+
+        # Checkout each file
+        foreach ($file in $filePaths) {            
+            git -C "${script:llamacppDir}" checkout $file
+        }
+        git -C "${script:llamacppDir}" checkout CMakeLists.txt
+    }
+}
+
+
+function build_cuda() {
+    if ((-not "${env:OLLAMA_SKIP_CUDA_GENERATE}") -and ("${script:CUDA_LIB_DIR}")) {
+        # Then build cuda as a dynamically loaded library
+        $nvcc = "$script:CUDA_LIB_DIR\nvcc.exe"
+        $script:CUDA_VERSION=(get-item ($nvcc | split-path | split-path)).Basename
+        if ($null -ne $script:CUDA_VERSION) {
+            $script:CUDA_VARIANT="_"+$script:CUDA_VERSION
+        }
+        init_vars
+        $script:buildDir="../build/windows/${script:ARCH}/cuda$script:CUDA_VARIANT"
+        $script:distDir="$script:DIST_BASE\cuda$script:CUDA_VARIANT"
+        $script:cmakeDefs += @(
+            "-A", "x64",
+            "-DGGML_CUDA=ON",
+	    "-GGML_CUDA_F16=true",
+            "-DGGML_AVX=on",
+            "-DGGML_AVX2=on",
+            "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR",
+            "-DCMAKE_CUDA_FLAGS=-t8",
+            "-DCMAKE_CUDA_ARCHITECTURES=89"
+            )
+        if ($null -ne $env:OLLAMA_CUSTOM_CUDA_DEFS) {
+            write-host "OLLAMA_CUSTOM_CUDA_DEFS=`"${env:OLLAMA_CUSTOM_CUDA_DEFS}`""
+            $script:cmakeDefs +=@("${env:OLLAMA_CUSTOM_CUDA_DEFS}")
+            write-host "building custom CUDA GPU"
+        }
+        build
+        sign
+        install
+
+        rm -ea 0 -recurse -force -path "${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\"
+        md "${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\" -ea 0 > $null
+        write-host "copying CUDA dependencies to ${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\"
+        cp "${script:CUDA_LIB_DIR}\cudart64_*.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\"
+        cp "${script:CUDA_LIB_DIR}\cublas64_*.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\"
+        cp "${script:CUDA_LIB_DIR}\cublasLt64_*.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\cuda\"
+    } else {
+        write-host "Skipping CUDA generation step"
+    }
+}
+
+function build_oneapi() {
+  if ((-not "${env:OLLAMA_SKIP_ONEAPI_GENERATE}") -and ("${env:ONEAPI_ROOT}"))  {
+    # Get oneAPI version
+    $script:ONEAPI_VERSION = icpx --version
+    $script:ONEAPI_VERSION = [regex]::Match($script:ONEAPI_VERSION, '(?<=oneAPI DPC\+\+/C\+\+ Compiler )(?<version>\d+\.\d+\.\d+)').Value
+    if ($null -ne $script:ONEAPI_VERSION) {
+      $script:ONEAPI_VARIANT = "_v" + $script:ONEAPI_VERSION
+    }
+    init_vars
+    $script:buildDir = "../build/windows/${script:ARCH}/oneapi$script:ONEAPI_VARIANT"
+    $script:distDir ="$script:DIST_BASE\oneapi$script:ONEAPI_VARIANT"
+    $script:cmakeDefs += @(
+      "-G", "MinGW Makefiles",
+      "-DGGML_SYCL=ON",
+      "-DCMAKE_C_COMPILER=icx",
+      "-DCMAKE_CXX_COMPILER=icx",
+      "-DCMAKE_BUILD_TYPE=Release"
+    )
+
+    Write-Host "Building oneAPI"
+    build
+    # Ninja doesn't prefix with config name
+    if ($null -ne $script:DUMPBIN) {
+      & "$script:DUMPBIN" /dependents "${script:buildDir}/bin/ollama_llama_server.exe" | Select-String ".dll"
+    }
+    sign
+    install
+
+    rm -ea 0 -recurse -force -path "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    md "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\" -ea 0 > $null
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\libirngmd.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\libmmd.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_level_zero.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_unified_runtime.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_win_proxy_loader.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\svml_dispmd.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\sycl7.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_core.2.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_sycl_blas.4.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_tbb_thread.2.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\oneapi\"
+  } else {
+    Write-Host "Skipping oneAPI generation step"
+  }
+}
+
+
+init_vars
+if ($($args.count) -eq 0) {
+    git_module_setup
+    apply_patches
+    if ($script:ARCH -eq "arm64") {
+        build_cpu("ARM64")
+    } else { # amd64
+        build_cuda
+	build_oneapi
+    }
+
+    cleanup
+    write-host "`ngo generate completed.  LLM runners: $(get-childitem -path $script:DIST_BASE)"
+} else {
+    for ( $i = 0; $i -lt $args.count; $i++ ) {
+        write-host "performing $($args[$i])"
+        & $($args[$i])
+    } 
+}
