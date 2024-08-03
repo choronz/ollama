@@ -171,7 +171,7 @@ function build_cuda() {
         $script:cmakeDefs += @(
             "-A", "x64",
             "-DGGML_CUDA=ON",
-	    "-DLLAMA_CUBLAS=on",
+	    "-GGML_CUDA_F16=true",
             "-DGGML_AVX=on",
             "-DGGML_AVX2=on",
             "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR",
