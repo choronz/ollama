@@ -2,22 +2,6 @@
 
 $ErrorActionPreference = "Stop"
 
-function amdGPUs {
-    if ($env:AMDGPU_TARGETS) {
-        return $env:AMDGPU_TARGETS
-    }
-    # Current supported rocblas list from ROCm v6.1.2 on windows
-    # https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html#windows-supported-gpus
-    $GPU_LIST = @(
-        "gfx1030"
-        "gfx1100"
-        "gfx1101"
-        "gfx1102"
-    )
-    $GPU_LIST -join ';'
-}
-
-
 function init_vars {
     if (!$script:SRC_DIR) {
         $script:SRC_DIR = $(resolve-path "..\..\")
@@ -59,13 +43,13 @@ function init_vars {
     }
     $script:DUMPBIN=(get-command -ea 'silentlycontinue' dumpbin).path
     if ($null -eq $env:CMAKE_CUDA_ARCHITECTURES) {
-        $script:CMAKE_CUDA_ARCHITECTURES="50;52;61;70;75;80"
+        $script:CMAKE_CUDA_ARCHITECTURES="89"
     } else {
-        $script:CMAKE_CUDA_ARCHITECTURES=$env:CMAKE_CUDA_ARCHITECTURES
+        $script:CMAKE_CUDA_ARCHITECTURES="89"
     }
     # Note: Windows Kits 10 signtool crashes with GCP's plugin
     if ($null -eq $env:SIGN_TOOL) {
-        ${script:SignTool}="C:\Program Files (x86)\Windows Kits\8.1\bin\x64\signtool.exe"
+        ${script:SignTool}="C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
     } else {
         ${script:SignTool}=${env:SIGN_TOOL}
     }
@@ -173,90 +157,6 @@ function cleanup {
 }
 
 
-# -DGGML_AVX -- 2011 Intel Sandy Bridge & AMD Bulldozer
-# -DGGML_AVX2 -- 2013 Intel Haswell & 2015 AMD Excavator / 2017 AMD Zen
-# -DGGML_FMA (FMA3) -- 2013 Intel Haswell & 2012 AMD Piledriver
-
-
-function build_static() {
-    if ((-not "${env:OLLAMA_SKIP_STATIC_GENERATE}") -and ((-not "${env:OLLAMA_CPU_TARGET}") -or ("${env:OLLAMA_CPU_TARGET}" -eq "static"))) {
-        # GCC build for direct linking into the Go binary
-        init_vars
-        # cmake will silently fallback to msvc compilers if mingw isn't in the path, so detect and fail fast
-        # as we need this to be compiled by gcc for golang to be able to link with itx
-        write-host "Checking for MinGW..."
-        # error action ensures we exit on failure
-        get-command gcc
-        get-command mingw32-make
-        $oldTargets = $script:cmakeTargets
-        $script:cmakeTargets = @("llama", "ggml")
-        $script:cmakeDefs = @(
-            "-G", "MinGW Makefiles"
-            "-DCMAKE_C_COMPILER=gcc.exe",
-            "-DCMAKE_CXX_COMPILER=g++.exe",
-            "-DBUILD_SHARED_LIBS=off",
-            "-DGGML_NATIVE=off",
-            "-DGGML_AVX=off",
-            "-DGGML_AVX2=off",
-            "-DGGML_AVX512=off",
-            "-DGGML_F16C=off",
-            "-DGGML_FMA=off",
-            "-DGGML_OPENMP=off")
-        $script:buildDir="../build/windows/${script:ARCH}_static"
-        write-host "Building static library"
-        build
-        $script:cmakeTargets = $oldTargets
-    } else {
-        write-host "Skipping CPU generation step as requested"
-    }
-}
-
-function build_cpu($gen_arch) {
-    if ((-not "${env:OLLAMA_SKIP_CPU_GENERATE}" ) -and ((-not "${env:OLLAMA_CPU_TARGET}") -or ("${env:OLLAMA_CPU_TARGET}" -eq "cpu"))) {
-        # remaining llama.cpp builds use MSVC 
-        init_vars
-        $script:cmakeDefs = $script:commonCpuDefs + @("-A", $gen_arch, "-DGGML_AVX=off", "-DGGML_AVX2=off", "-DGGML_AVX512=off", "-DGGML_FMA=off", "-DGGML_F16C=off") + $script:cmakeDefs
-        $script:buildDir="../build/windows/${script:ARCH}/cpu"
-        $script:distDir="$script:DIST_BASE\cpu"
-        write-host "Building LCD CPU"
-        build
-        sign
-        install
-    } else {
-        write-host "Skipping CPU generation step as requested"
-    }
-}
-
-function build_cpu_avx() {
-    if ((-not "${env:OLLAMA_SKIP_CPU_GENERATE}" ) -and ((-not "${env:OLLAMA_CPU_TARGET}") -or ("${env:OLLAMA_CPU_TARGET}" -eq "cpu_avx"))) {
-        init_vars
-        $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DGGML_AVX=on", "-DGGML_AVX2=off", "-DGGML_AVX512=off", "-DGGML_FMA=off", "-DGGML_F16C=off") + $script:cmakeDefs
-        $script:buildDir="../build/windows/${script:ARCH}/cpu_avx"
-        $script:distDir="$script:DIST_BASE\cpu_avx"
-        write-host "Building AVX CPU"
-        build
-        sign
-        install
-    } else {
-        write-host "Skipping CPU AVX generation step as requested"
-    }
-}
-
-function build_cpu_avx2() {
-    if ((-not "${env:OLLAMA_SKIP_CPU_GENERATE}" ) -and ((-not "${env:OLLAMA_CPU_TARGET}") -or ("${env:OLLAMA_CPU_TARGET}" -eq "cpu_avx2"))) {
-        init_vars
-        $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DGGML_AVX=on", "-DGGML_AVX2=on", "-DGGML_AVX512=off", "-DGGML_FMA=on", "-DGGML_F16C=on") + $script:cmakeDefs
-        $script:buildDir="../build/windows/${script:ARCH}/cpu_avx2"
-        $script:distDir="$script:DIST_BASE\cpu_avx2"
-        write-host "Building AVX2 CPU"
-        build
-        sign
-        install
-    } else {
-        write-host "Skipping CPU AVX2 generation step as requested"
-    }
-}
-
 function build_cuda() {
     if ((-not "${env:OLLAMA_SKIP_CUDA_GENERATE}") -and ("${script:CUDA_LIB_DIR}")) {
         # Then build cuda as a dynamically loaded library
@@ -271,11 +171,12 @@ function build_cuda() {
         $script:cmakeDefs += @(
             "-A", "x64",
             "-DGGML_CUDA=ON",
+	    "-DLLAMA_CUBLAS=on",
             "-DGGML_AVX=on",
-            "-DGGML_AVX2=off",
+            "-DGGML_AVX2=on",
             "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR",
             "-DCMAKE_CUDA_FLAGS=-t8",
-            "-DCMAKE_CUDA_ARCHITECTURES=${script:CMAKE_CUDA_ARCHITECTURES}"
+            "-DCMAKE_CUDA_ARCHITECTURES=89"
             )
         if ($null -ne $env:OLLAMA_CUSTOM_CUDA_DEFS) {
             write-host "OLLAMA_CUSTOM_CUDA_DEFS=`"${env:OLLAMA_CUSTOM_CUDA_DEFS}`""
