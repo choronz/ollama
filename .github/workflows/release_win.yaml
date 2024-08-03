@@ -17,7 +17,7 @@ function init_vars {
         "-DGGML_NATIVE=on",
         "-DGGML_OPENMP=on",
 	"-DGGML_CUDA_F16=on"
-        )
+    )
     $script:commonCpuDefs = @("-DCMAKE_POSITION_INDEPENDENT_CODE=on")
     $script:ARCH = $Env:PROCESSOR_ARCHITECTURE.ToLower()
     $script:DIST_BASE = "${script:SRC_DIR}\dist\windows-${script:ARCH}\ollama_runners"
