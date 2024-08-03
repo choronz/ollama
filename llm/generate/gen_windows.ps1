@@ -14,8 +14,9 @@ function init_vars {
     }
     $script:cmakeDefs = @(
         "-DBUILD_SHARED_LIBS=on",
-        "-DGGML_NATIVE=off",
-        "-DGGML_OPENMP=off"
+        "-DGGML_NATIVE=on",
+        "-DGGML_OPENMP=on",
+	"-DGGML_CUDA_F16=on"
         )
     $script:commonCpuDefs = @("-DCMAKE_POSITION_INDEPENDENT_CODE=on")
     $script:ARCH = $Env:PROCESSOR_ARCHITECTURE.ToLower()
