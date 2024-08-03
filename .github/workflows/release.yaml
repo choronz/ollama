@@ -1,16 +1,16 @@
-name: release_new
+name: release
 
 on:
   push:
-    branches:
-    - main
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 jobs:
-  # Windows builds take a long time to both install the dependencies and build, so parallelize CPU generation step
+  # Windows builds take a long time to both install the dependencies and build, so parallelize
+  # CPU generation step
   generate-windows-cpu:
     environment: release
-    runs-on: windows-2019
+    runs-on: windows
     env:
       KEY_CONTAINER: ${{ vars.KEY_CONTAINER }}
     steps:
@@ -18,14 +18,18 @@ jobs:
       - name: Set Version
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-      # - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
-      - name: install Windows SDK 10 to get signtool
+      - uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: 'ollama'
+          credentials_json: '${{ secrets.GOOGLE_SIGNING_CREDENTIALS }}'
+      - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
+      - name: install Windows SDK 8.1 to get signtool
         run: |
           $ErrorActionPreference = "Stop"
           write-host "downloading SDK"
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe" -OutFile "${env:RUNNER_TEMP}\winsdksetup.exe"
-          Start-Process "${env:RUNNER_TEMP}\winsdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
-          write-host "Win SDK 10 installed"
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=323507" -OutFile "${env:RUNNER_TEMP}\sdksetup.exe"
+          Start-Process "${env:RUNNER_TEMP}\sdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
+          write-host "Win SDK 8.1 installed"
           gci -path 'C:\Program Files (x86)\Windows Kits\' -r -fi 'signtool.exe'
       - name: install signing plugin
         run: |
@@ -56,10 +60,11 @@ jobs:
             llm/build/**/bin/*
             llm/build/**/*.a
             dist/windows-amd64/**
+      
   # CUDA generation step
   generate-windows-cuda:
     environment: release
-    runs-on: windows-2019
+    runs-on: windows
     env:
       KEY_CONTAINER: ${{ vars.KEY_CONTAINER }}
     steps:
@@ -67,18 +72,18 @@ jobs:
       - name: Set Version
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-      #- uses: 'google-github-actions/auth@v2'
-      #  with:
-      #    project_id: 'ollama'
-      #    credentials_json: '${{ secrets.GOOGLE_SIGNING_CREDENTIALS }}'
-      # - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
-      - name: install Windows SDK 10 to get signtool
+      - uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: 'ollama'
+          credentials_json: '${{ secrets.GOOGLE_SIGNING_CREDENTIALS }}'
+      - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
+      - name: install Windows SDK 8.1 to get signtool
         run: |
           $ErrorActionPreference = "Stop"
           write-host "downloading SDK"
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe" -OutFile "${env:RUNNER_TEMP}\winsdksetup.exe"
-          Start-Process "${env:RUNNER_TEMP}\winsdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
-          write-host "Win SDK 10 installed"
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=323507" -OutFile "${env:RUNNER_TEMP}\sdksetup.exe"
+          Start-Process "${env:RUNNER_TEMP}\sdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
+          write-host "Win SDK 8.1 installed"
           gci -path 'C:\Program Files (x86)\Windows Kits\' -r -fi 'signtool.exe'
       - name: install signing plugin
         run: |
@@ -97,7 +102,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           write-host "downloading CUDA Installer"
-          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe" -OutFile "${env:RUNNER_TEMP}\cuda-install.exe"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/11.3.1/local_installers/cuda_11.3.1_465.89_win10.exe" -OutFile "${env:RUNNER_TEMP}\cuda-install.exe"
           write-host "Installing CUDA"
           Start-Process "${env:RUNNER_TEMP}\cuda-install.exe" -ArgumentList '-s' -NoNewWindow -Wait
           write-host "Completed CUDA"
@@ -141,9 +146,10 @@ jobs:
   # Import the prior generation steps and build the final windows assets
   build-windows:
     environment: release
-    runs-on: windows-2019
+    runs-on: windows
     needs:
       - generate-windows-cuda
+      - generate-windows-cpu
     env:
       KEY_CONTAINER: ${{ vars.KEY_CONTAINER }}
     steps:
@@ -153,14 +159,18 @@ jobs:
       - name: Set Version
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-      # - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
-      - name: install Windows SDK 10 to get signtool
+      - uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: 'ollama'
+          credentials_json: '${{ secrets.GOOGLE_SIGNING_CREDENTIALS }}'
+      - run: echo "${{ vars.OLLAMA_CERT }}" > ollama_inc.crt
+      - name: install Windows SDK 8.1 to get signtool
         run: |
           $ErrorActionPreference = "Stop"
           write-host "downloading SDK"
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe" -OutFile "${env:RUNNER_TEMP}\winsdksetup.exe"
-          Start-Process "${env:RUNNER_TEMP}\winsdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
-          write-host "Win SDK 10 installed"
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=323507" -OutFile "${env:RUNNER_TEMP}\sdksetup.exe"
+          Start-Process "${env:RUNNER_TEMP}\sdksetup.exe" -ArgumentList @("/q") -NoNewWindow -Wait
+          write-host "Win SDK 8.1 installed"
           gci -path 'C:\Program Files (x86)\Windows Kits\' -r -fi 'signtool.exe'
       - name: install signing plugin
         run: |
@@ -178,10 +188,19 @@ jobs:
       - run: go get
       - uses: actions/download-artifact@v4
         with:
+          name: generate-windows-cpu
+      - uses: actions/download-artifact@v4
+        with:
           name: generate-windows-cuda
-      # - uses: actions/download-artifact@v4
-      #  with:
-      #    name: windows-cuda-deps
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-cuda-deps
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-rocm-deps
+      - uses: actions/download-artifact@v4
+        with:
+          name: generate-windows-rocm
       - run: dir llm/build
       - run: |
           $gopath=(get-command go).source | split-path -parent
@@ -198,11 +217,96 @@ jobs:
             dist/OllamaSetup.exe
             dist/ollama-windows-*.zip
 
+  # Linux x86 assets built using the container based build
+  build-linux-amd64:
+    environment: release
+    runs-on: linux
+    env:
+      OLLAMA_SKIP_MANIFEST_CREATE: '1'
+      BUILD_ARCH: amd64
+      PUSH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set Version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
+      - run: |
+          ./scripts/build_linux.sh
+          ./scripts/build_docker.sh
+          mv dist/deps/* dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-amd64
+          path: |
+            dist/*linux*
+            !dist/*-cov
+
+  # Linux ARM assets built using the container based build
+  # (at present, docker isn't pre-installed on arm ubunutu images)
+  build-linux-arm64:
+    environment: release
+    runs-on: linux-arm64
+    env:
+      OLLAMA_SKIP_MANIFEST_CREATE: '1'
+      BUILD_ARCH: arm64
+      PUSH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set Version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+      - name: 'Install Docker'
+        run: |
+          # Add Docker's official GPG key:
+          env
+          uname -a
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+          # Add the repository to Apt sources:
+          echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+            $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+          sudo usermod -aG docker $USER
+          sudo apt-get install acl
+          sudo setfacl --modify user:$USER:rw /var/run/docker.sock
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
+      - run: |
+          ./scripts/build_linux.sh
+          ./scripts/build_docker.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-arm64
+          path: |
+            dist/*linux*
+            !dist/*-cov
+
   # Aggregate all the assets and ship a release
   release:
     needs:
       - build-windows
-    runs-on: ubuntu-22.04
+      - build-linux-amd64
+      - build-linux-arm64
+    runs-on: linux
     environment: release
     permissions:
       contents: write
@@ -222,7 +326,7 @@ jobs:
         with:
           username: ${{ vars.DOCKER_USER }}
           password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
-      # - run: ./scripts/build_docker.sh
+      - run: ./scripts/build_docker.sh
       - name: Retrieve built artifact
         uses: actions/download-artifact@v4
         with:
