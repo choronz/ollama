@@ -15,8 +15,8 @@ function init_vars {
     $script:cmakeDefs = @(
         "-DBUILD_SHARED_LIBS=on",
         "-DGGML_NATIVE=on",
-        "-DGGML_OPENMP=on",
-	"-DGGML_CUDA_F16=on"
+        "-DGGML_OPENMP=on"
+	# "-DGGML_CUDA_F16=on"
         )
     $script:commonCpuDefs = @("-DCMAKE_POSITION_INDEPENDENT_CODE=on")
     $script:ARCH = $Env:PROCESSOR_ARCHITECTURE.ToLower()
@@ -172,7 +172,7 @@ function build_cuda() {
         $script:cmakeDefs += @(
             "-A", "x64",
             "-DGGML_CUDA=ON",
-	    "-GGML_CUDA_F16=true",
+	    "-DGGML_CUDA_F16=true",
             "-DGGML_AVX=on",
             "-DGGML_AVX2=on",
             "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR",
@@ -242,61 +242,6 @@ function build_oneapi() {
   } else {
     Write-Host "Skipping oneAPI generation step"
   }
-}
-
-function build_rocm() {
-    if ((-not "${env:OLLAMA_SKIP_ROCM_GENERATE}") -and ("${env:HIP_PATH}")) {
-        $script:ROCM_VERSION=(get-item $env:HIP_PATH).Basename
-        if ($null -ne $script:ROCM_VERSION) {
-            $script:ROCM_VARIANT="_v"+$script:ROCM_VERSION
-        }
-
-        init_vars
-        $script:buildDir="../build/windows/${script:ARCH}/rocm$script:ROCM_VARIANT"
-        $script:distDir="$script:DIST_BASE\rocm$script:ROCM_VARIANT"
-        $script:cmakeDefs += @(
-            "-G", "Ninja", 
-            "-DCMAKE_C_COMPILER=clang.exe",
-            "-DCMAKE_CXX_COMPILER=clang++.exe",
-            "-DGGML_HIPBLAS=on",
-            "-DLLAMA_CUDA_NO_PEER_COPY=on",
-            "-DHIP_PLATFORM=amd",
-            "-DGGML_AVX=on",
-            "-DGGML_AVX2=off",
-            "-DCMAKE_POSITION_INDEPENDENT_CODE=on",
-            "-DAMDGPU_TARGETS=$(amdGPUs)",
-            "-DGPU_TARGETS=$(amdGPUs)"
-            )
-
-        # Make sure the ROCm binary dir is first in the path
-        $env:PATH="$env:HIP_PATH\bin;$env:PATH"
-
-        # We have to clobber the LIB var from the developer shell for clang to work properly
-        $env:LIB=""
-        if ($null -ne $env:OLLAMA_CUSTOM_ROCM_DEFS) {
-            write-host "OLLAMA_CUSTOM_ROCM_DEFS=`"${env:OLLAMA_CUSTOM_ROCM_DEFS}`""
-            $script:cmakeDefs += @("${env:OLLAMA_CUSTOM_ROCM_DEFS}")
-            write-host "building custom ROCM GPU"
-        }
-        write-host "Building ROCm"
-        build
-        # Ninja doesn't prefix with config name
-        ${script:config}=""
-        if ($null -ne $script:DUMPBIN) {
-            & "$script:DUMPBIN" /dependents "${script:buildDir}/bin/ollama_llama_server.exe" | select-string ".dll"
-        }
-        sign
-        install
-
-        rm -ea 0 -recurse -force -path "${script:SRC_DIR}\dist\windows-${script:ARCH}\rocm\"
-        md "${script:SRC_DIR}\dist\windows-${script:ARCH}\rocm\rocblas\library\" -ea 0 > $null
-        cp "${env:HIP_PATH}\bin\hipblas.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\rocm\"
-        cp "${env:HIP_PATH}\bin\rocblas.dll" "${script:SRC_DIR}\dist\windows-${script:ARCH}\rocm\"
-        # amdhip64.dll dependency comes from the driver and must be installed on the host to use AMD GPUs
-        cp "${env:HIP_PATH}\bin\rocblas\library\*" "${script:SRC_DIR}\dist\windows-${script:ARCH}\rocm\rocblas\library\"
-    } else {
-        write-host "Skipping ROCm generation step"
-    }
 }
 
 init_vars
