@@ -143,7 +143,6 @@ jobs:
           $env:PATH="$gopath;$env:PATH"
           $env:OLLAMA_SKIP_GENERATE="1"
           $env:CMAKE_CUDA_ARCHITECTURES="89"
-	  $env:GGML_CUDA_F16="1"
           & .\scripts\build_windows.ps1
       - uses: actions/upload-artifact@v4
         with:
